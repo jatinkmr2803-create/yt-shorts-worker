@@ -293,6 +293,65 @@ async def health_check():
     }
 
 
+@app.get("/debug-download")
+async def debug_download():
+    """Test yt-dlp configurations directly on this server to diagnose issues."""
+    import yt_dlp
+
+    test_url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # Short 19s video
+
+    cookie_path = None
+    for name in ["www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies"]:
+        candidate = os.path.join(os.path.dirname(__file__), name)
+        if os.path.exists(candidate):
+            cookie_path = candidate
+            break
+
+    results = {}
+
+    # Test configs
+    configs = {
+        "ios_no_cookies": {
+            "extractor_args": {"youtube": ["player_client=ios"]},
+            "format": "bestvideo[height<=720]+bestaudio/best",
+        },
+        "ios_with_cookies": {
+            "extractor_args": {"youtube": ["player_client=ios"]},
+            "format": "bestvideo[height<=720]+bestaudio/best",
+            **({"cookiefile": cookie_path} if cookie_path else {}),
+        },
+        "default_with_cookies": {
+            "format": "bestvideo[height<=720]+bestaudio/best",
+            **({"cookiefile": cookie_path} if cookie_path else {}),
+        },
+        "tv_no_cookies": {
+            "extractor_args": {"youtube": ["player_client=tv"]},
+            "format": "bestvideo[height<=720]+bestaudio/best",
+        },
+        "mweb_with_cookies": {
+            "extractor_args": {"youtube": ["player_client=mweb"]},
+            "format": "bestvideo[height<=720]+bestaudio/best",
+            **({"cookiefile": cookie_path} if cookie_path else {}),
+        },
+    }
+
+    for name, extra in configs.items():
+        opts = {"quiet": True, "no_warnings": True, "noplaylist": True, **extra}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(test_url, download=False)
+                results[name] = f"SUCCESS: {info.get('title')} [{info.get('format')}]"
+        except Exception as e:
+            results[name] = f"FAILED: {str(e)[:200]}"
+
+    return {
+        "cookie_path": cookie_path,
+        "cookie_exists": cookie_path is not None and os.path.exists(cookie_path) if cookie_path else False,
+        "cookie_size": os.path.getsize(cookie_path) if cookie_path and os.path.exists(cookie_path) else 0,
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "results": results,
+    }
+
 @app.post("/process", response_model=JobResponse)
 async def trigger_processing(request: ProcessRequest):
     """
