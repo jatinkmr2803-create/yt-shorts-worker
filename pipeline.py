@@ -86,6 +86,7 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
     ydl_opts = {
         "format": "bestvideo[height<=480]+bestaudio/best[height<=480]",
         "external_downloader": "ffmpeg",  # Bypasses all Python socket bugs by outsourcing raw HTTP fetching natively to FFmpeg
+        "extractor_args": {"youtube": ["player_client=android,ios,tv"]}, # Bypasses YouTube bot blocks automatically
         "merge_output_format": "mp4",
         "outtmpl": output_template,
         "noplaylist": True,
