@@ -83,6 +83,14 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
     os.makedirs(output_dir, exist_ok=True)
     output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
 
+    # Detect cookies file (required on datacenter IPs like Render to bypass YouTube bot detection)
+    cookie_path = None
+    for name in ["www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies"]:
+        candidate = os.path.join(os.path.dirname(__file__), name)
+        if os.path.exists(candidate):
+            cookie_path = candidate
+            break
+
     ydl_opts = {
         "format": "bestvideo[height<=720]+bestaudio/best",
         "extractor_args": {"youtube": ["player_client=ios"]},
@@ -99,6 +107,10 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
             }
         ],
     }
+
+    if cookie_path:
+        ydl_opts["cookiefile"] = cookie_path
+        logger.info(f"🍪 Using cookies: {cookie_path}")
 
     logger.info(f"⬇ Downloading (480p): {youtube_url}")
 
