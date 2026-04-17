@@ -269,13 +269,27 @@ class JobResponse(BaseModel):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint with deployment diagnostics."""
+    import yt_dlp
     supabase = get_supabase()
+
+    # Check for cookies file (same logic as pipeline.py)
+    cookie_found = None
+    for name in ["www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies"]:
+        candidate = os.path.join(os.path.dirname(__file__), name)
+        if os.path.exists(candidate):
+            cookie_found = name
+            break
+
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "supabase_connected": supabase is not None,
         "poll_interval": POLL_INTERVAL,
+        "yt_dlp_version": yt_dlp.version.__version__,
+        "cookies_file": cookie_found,
+        "working_dir": os.getcwd(),
+        "files_in_app": [f for f in os.listdir(os.path.dirname(__file__)) if not f.startswith("__")],
     }
 
 
