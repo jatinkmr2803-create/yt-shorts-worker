@@ -84,7 +84,8 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
     output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
 
     ydl_opts = {
-        "format": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+        "format": "bestvideo[height<=720]+bestaudio/best",
+        "extractor_args": {"youtube": ["player_client=ios,android"]},
         "merge_output_format": "mp4",
         "outtmpl": output_template,
         "noplaylist": True,
@@ -98,13 +99,6 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
             }
         ],
     }
-
-    # IMPORTANT: Check if user uploaded a cookies file specifically to bypass bot protection!
-    for cookie_file in ["cookies.txt", "www.youtube.com_cookies.txt", "www.youtube.com_cookies"]:
-        if os.path.exists(cookie_file):
-            ydl_opts["cookiefile"] = cookie_file
-            logger.info(f"🍪 Using provided {cookie_file} for bot protection bypass!")
-            break
 
     logger.info(f"⬇ Downloading (480p): {youtube_url}")
 
