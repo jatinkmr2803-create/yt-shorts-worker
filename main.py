@@ -47,7 +47,7 @@ logging.basicConfig(
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "5"))
-AUTO_DELETE_DAYS = int(os.getenv("AUTO_DELETE_DAYS", "7"))
+AUTO_DELETE_DAYS = int(os.getenv("AUTO_DELETE_DAYS", "1"))
 
 
 # ══════════════════════════════════════════════════════════════
