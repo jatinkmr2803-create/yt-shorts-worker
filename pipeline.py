@@ -21,12 +21,14 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 import yt_dlp
 from groq import Groq
 
@@ -71,26 +73,181 @@ MAX_TRANSCRIBE_WORKERS = int(os.getenv("MAX_TRANSCRIBE_WORKERS", "3"))
 # STEP 1: DOWNLOAD VIDEO
 # ═══════════════════════════════════════════════════════════════
 
+# Piped API instances (free YouTube proxies that bypass bot detection)
+PIPED_INSTANCES = [
+    "https://api.piped.private.coffee",
+]
+
+
+def _extract_video_id(url: str) -> str:
+    """Extract YouTube video ID from any URL format."""
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([a-zA-Z0-9_-]{11})',
+        r'([a-zA-Z0-9_-]{11})',
+    ]
+    for pat in patterns:
+        m = re.search(pat, url)
+        if m:
+            return m.group(1)
+    raise ValueError(f"Cannot extract video ID from: {url}")
+
+
+def _download_via_piped(video_id: str, output_dir: str) -> dict[str, Any] | None:
+    """
+    Download video using Piped API (free YouTube proxy).
+    Piped handles YouTube's bot detection on its own servers.
+    Returns result dict or None if all instances fail.
+    """
+    for api_url in PIPED_INSTANCES:
+        try:
+            logger.info(f"🔄 Trying Piped instance: {api_url}")
+            resp = httpx.get(f"{api_url}/streams/{video_id}", timeout=20)
+            data = resp.json()
+
+            if "error" in data:
+                logger.warning(f"Piped API error: {data['error']}")
+                continue
+
+            title = data.get("title", "Untitled")
+            duration = data.get("duration", 0)
+
+            # Find best video-only stream <= 720p (prefer mp4)
+            video_streams = sorted(
+                [s for s in data.get("videoStreams", []) if s.get("videoOnly", False)],
+                key=lambda s: int(s.get("height", 0) or 0),
+                reverse=True,
+            )
+            best_video = None
+            for v in video_streams:
+                h = int(v.get("height", 0) or 0)
+                if h <= 720:
+                    best_video = v
+                    break
+            if not best_video and video_streams:
+                best_video = video_streams[-1]  # smallest available
+
+            # Find best audio stream (prefer mp4/m4a)
+            audio_streams = sorted(
+                data.get("audioStreams", []),
+                key=lambda s: int(s.get("bitrate", 0) or 0),
+                reverse=True,
+            )
+            best_audio = None
+            for a in audio_streams:
+                if "mp4" in a.get("mimeType", "") or "m4a" in a.get("mimeType", ""):
+                    best_audio = a
+                    break
+            if not best_audio and audio_streams:
+                best_audio = audio_streams[0]
+
+            if not best_video or not best_audio:
+                # Try combined streams as fallback
+                combined = [s for s in data.get("videoStreams", [])
+                           if not s.get("videoOnly", True) and "mp4" in s.get("mimeType", "")]
+                if combined:
+                    combined.sort(key=lambda s: int(s.get("height", 0) or 0), reverse=True)
+                    stream_url = combined[0]["url"]
+                    output_path = os.path.join(output_dir, f"{video_id}.mp4")
+                    cmd = ["ffmpeg", "-y", "-i", stream_url, "-c", "copy",
+                           "-movflags", "+faststart", output_path]
+                    subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                        return {
+                            "video_path": output_path,
+                            "title": title,
+                            "duration": duration,
+                            "metadata": {"uploader": data.get("uploader", ""),
+                                         "view_count": data.get("views", 0),
+                                         "like_count": data.get("likes", 0),
+                                         "description": (data.get("description", "") or "")[:500]},
+                        }
+                logger.warning("No suitable streams found from Piped")
+                continue
+
+            # Download video and audio separately, merge with ffmpeg
+            video_tmp = os.path.join(output_dir, f"{video_id}_v.mp4")
+            audio_tmp = os.path.join(output_dir, f"{video_id}_a.m4a")
+            output_path = os.path.join(output_dir, f"{video_id}.mp4")
+
+            logger.info(f"⬇ Downloading video: {best_video.get('quality', '?')}")
+            cmd_v = ["ffmpeg", "-y", "-i", best_video["url"], "-c", "copy", video_tmp]
+            res_v = subprocess.run(cmd_v, capture_output=True, text=True, timeout=600)
+
+            logger.info(f"⬇ Downloading audio: {best_audio.get('quality', '?')}")
+            cmd_a = ["ffmpeg", "-y", "-i", best_audio["url"], "-c", "copy", audio_tmp]
+            res_a = subprocess.run(cmd_a, capture_output=True, text=True, timeout=600)
+
+            if res_v.returncode != 0 or res_a.returncode != 0:
+                logger.warning("Piped stream download failed, will try fallback")
+                for f in [video_tmp, audio_tmp]:
+                    if os.path.exists(f):
+                        os.remove(f)
+                continue
+
+            # Merge video + audio
+            logger.info("🔀 Merging video + audio...")
+            cmd_merge = [
+                "ffmpeg", "-y",
+                "-i", video_tmp, "-i", audio_tmp,
+                "-c", "copy", "-movflags", "+faststart",
+                output_path,
+            ]
+            res_m = subprocess.run(cmd_merge, capture_output=True, text=True, timeout=300)
+
+            # Cleanup temp files
+            for f in [video_tmp, audio_tmp]:
+                if os.path.exists(f):
+                    os.remove(f)
+
+            if res_m.returncode != 0 or not os.path.exists(output_path):
+                logger.warning("Merge failed")
+                continue
+
+            logger.info(f"✓ Downloaded via Piped: {title} ({duration}s)")
+            return {
+                "video_path": output_path,
+                "title": title,
+                "duration": duration,
+                "metadata": {
+                    "uploader": data.get("uploader", ""),
+                    "view_count": data.get("views", 0),
+                    "like_count": data.get("likes", 0),
+                    "description": (data.get("description", "") or "")[:500],
+                },
+            }
+
+        except Exception as e:
+            logger.warning(f"Piped instance {api_url} failed: {e}")
+            continue
+
+    return None
+
+
 def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
     """
-    Download a YouTube video at an enforced 480p quality level using yt-dlp.
+    Download a YouTube video.
 
-    480p provides a strong balance of reasonable fidelity while guaranteeing extremely fast downloads.
+    Strategy:
+      1. Try Piped API (free YouTube proxy — bypasses datacenter IP blocks)
+      2. Fall back to yt-dlp direct download (works on residential IPs)
 
     Returns:
         Dict with 'video_path', 'title', 'duration', and 'metadata'.
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    video_id = _extract_video_id(youtube_url)
+    logger.info(f"⬇ Downloading: {youtube_url} (id={video_id})")
+
+    # ── Strategy 1: Piped API (bypasses YouTube bot detection) ──
+    result = _download_via_piped(video_id, output_dir)
+    if result:
+        return result
+
+    logger.info("⚠ Piped failed, falling back to yt-dlp direct download...")
+
+    # ── Strategy 2: yt-dlp direct (works on residential IPs) ──
     output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
-
-    # Detect cookies file (required on datacenter IPs like Render to bypass YouTube bot detection)
-    cookie_path = None
-    for name in ["www.youtube.com_cookies.txt", "cookies.txt", "www.youtube.com_cookies"]:
-        candidate = os.path.join(os.path.dirname(__file__), name)
-        if os.path.exists(candidate):
-            cookie_path = candidate
-            break
-
     ydl_opts = {
         "format": "bestvideo[height<=720]+bestaudio/best",
         "extractor_args": {"youtube": ["player_client=ios"]},
@@ -101,18 +258,9 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
         "no_warnings": True,
         "writeinfojson": False,
         "postprocessors": [
-            {
-                "key": "FFmpegVideoConvertor",
-                "preferedformat": "mp4",
-            }
+            {"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}
         ],
     }
-
-    if cookie_path:
-        ydl_opts["cookiefile"] = cookie_path
-        logger.info(f"🍪 Using cookies: {cookie_path}")
-
-    logger.info(f"⬇ Downloading (480p): {youtube_url}")
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(youtube_url, download=True)
@@ -120,13 +268,12 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
         if info is None:
             raise RuntimeError(f"Failed to extract info for {youtube_url}")
 
-        video_id = info.get("id", "unknown")
-        video_path = os.path.join(output_dir, f"{video_id}.mp4")
+        vid = info.get("id", "unknown")
+        video_path = os.path.join(output_dir, f"{vid}.mp4")
 
-        # yt-dlp may save with different extension, find the actual file
         if not os.path.exists(video_path):
             for ext in ["mp4", "mkv", "webm"]:
-                candidate = os.path.join(output_dir, f"{video_id}.{ext}")
+                candidate = os.path.join(output_dir, f"{vid}.{ext}")
                 if os.path.exists(candidate):
                     video_path = candidate
                     break
