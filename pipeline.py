@@ -85,7 +85,7 @@ def download_video(youtube_url: str, output_dir: str) -> dict[str, Any]:
 
     ydl_opts = {
         "format": "bestvideo[height<=720]+bestaudio/best",
-        "extractor_args": {"youtube": ["player_client=ios,android"]},
+        "extractor_args": {"youtube": ["player_client=ios"]},
         "merge_output_format": "mp4",
         "outtmpl": output_template,
         "noplaylist": True,
